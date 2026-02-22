@@ -1,0 +1,20 @@
+{
+  "name": "cashflow",
+  "version": "0.1.0",
+  "type": "module",
+  "bin": {
+    "cashflow": "./src/cli.ts"
+  },
+  "scripts": {
+    "dev": "bun run src/cli.ts",
+    "test": "bun test"
+  },
+  "dependencies": {
+    "chalk": "^5.4.1",
+    "commander": "^13.1.0",
+    "plaid": "^29.0.0"
+  },
+  "devDependencies": {
+    "@types/bun": "^1.2.4"
+  }
+}
