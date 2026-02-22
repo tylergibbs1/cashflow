@@ -28,6 +28,7 @@ export class Transaction {
   payment_channel!: string | null;
   transaction_type!: string | null;
   authorized_date!: string | null;
+  tag!: string | null;
 
   get isIncome(): boolean {
     return this.amount < 0;
@@ -40,6 +41,14 @@ export class Transaction {
   get isPending(): boolean {
     return this.pending === 1;
   }
+}
+
+export class TagRule {
+  id!: number;
+  pattern!: string;
+  tag!: string;
+  priority!: number;
+  created_at!: string;
 }
 
 export interface SyncState {
@@ -95,6 +104,7 @@ export interface TransactionResponse {
   category: string | null;
   subcategory: string | null;
   payment_channel: string | null;
+  tag: string | null;
 }
 
 export interface AccountsResponse {
@@ -114,9 +124,86 @@ export interface SyncResponse {
   has_more: boolean;
 }
 
+export interface SearchResponse {
+  transactions: TransactionResponse[];
+  count: number;
+  query: string;
+}
+
+export interface GrepResponse {
+  transactions: TransactionResponse[];
+  count: number;
+  pattern: string;
+}
+
+export interface TagRulesResponse {
+  rules: { id: number; pattern: string; tag: string; priority: number }[];
+  count: number;
+}
+
+export interface TagSummary {
+  tag: string;
+  count: number;
+  total: number;
+}
+
+export interface SplitResponse {
+  categories: TagSummary[];
+  total: number;
+}
+
+export interface BudgetStatus {
+  tag: string;
+  monthly_limit: number;
+  alert_threshold: number;
+  spent: number;
+  remaining: number;
+  percent_used: number;
+  over_budget: boolean;
+}
+
+export interface BudgetsResponse {
+  budgets: BudgetStatus[];
+  month: string;
+}
+
+export interface MonthlyBurn {
+  month: string;
+  total: number;
+}
+
+export interface BurnReport {
+  months: MonthlyBurn[];
+  trend: "increasing" | "decreasing" | "stable";
+}
+
+export interface BurnResponse {
+  burn: BurnReport;
+}
+
+export interface MonthlyNet {
+  month: string;
+  income: number;
+  expenses: number;
+  net: number;
+}
+
+export interface NetReport {
+  months: MonthlyNet[];
+}
+
+export interface NetResponse {
+  net: NetReport;
+}
+
 export interface SnapshotResponse {
   accounts: AccountResponse[];
-  transactions: TransactionResponse[];
+  total_balance: number;
+  recent_transactions: TransactionResponse[];
+  budgets: BudgetStatus[];
+  alerts: BudgetStatus[];
+  burn: BurnReport;
+  runway_months: number | null;
   synced_at: string;
 }
 

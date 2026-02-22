@@ -107,5 +107,15 @@ export async function getDecryptedPlaidCredentials(): Promise<{
   };
 }
 
+export function removeItem(itemId: string): boolean {
+  const config = loadConfig();
+  if (!config) return false;
+  const before = config.items.length;
+  config.items = config.items.filter((i) => i.item_id !== itemId);
+  if (config.items.length === before) return false;
+  saveConfig(config);
+  return true;
+}
+
 // For testing
 export const _paths = { CONFIG_DIR, CONFIG_PATH };

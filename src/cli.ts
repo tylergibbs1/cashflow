@@ -2,15 +2,29 @@
 
 import { Command } from "commander";
 import { createInterface } from "readline/promises";
-import { initDb, getAccounts, getTransactions } from "./core/db.js";
+import {
+  initDb,
+  getAccounts,
+  getTransactions,
+  getAccountByIdOrMask,
+  removeAccountsByItem,
+  removeTransactionsByAccount,
+  removeSyncState,
+} from "./core/db.js";
 import {
   encrypt,
   saveConfig,
   loadConfig,
   isConfigured,
+  removeItem,
 } from "./core/config.js";
-import { runLinkFlow, getPlaidClient } from "./core/plaid.js";
+import { runLinkFlow } from "./core/plaid.js";
 import { syncAll } from "./core/sync.js";
+import { searchTransactions, grepTransactions } from "./core/search.js";
+import { addTagRule, getTagRules, getSpendingByTag } from "./core/tags.js";
+import { setBudget, getBudgetStatuses, deleteBudget } from "./core/budgets.js";
+import { getBurnReport, getNetReport, getSnapshot } from "./core/reports.js";
+import { exportCsv, exportJson } from "./core/export.js";
 import {
   writeJson,
   writeError,
@@ -28,6 +42,14 @@ import type {
   AccountResponse,
   TransactionResponse,
   ErrorResponse,
+  SearchResponse,
+  GrepResponse,
+  TagRulesResponse,
+  SplitResponse,
+  BudgetsResponse,
+  BurnResponse,
+  NetResponse,
+  SnapshotResponse,
 } from "./types/index.js";
 import {
   ConfigError,
@@ -40,7 +62,7 @@ const program = new Command();
 program
   .name("cashflow")
   .description("Agent-first personal finance CLI")
-  .version("0.1.0");
+  .version("1.0.0");
 
 program.option("--pretty", "Human-readable table output instead of JSON");
 
@@ -54,7 +76,6 @@ program
     try {
       let config = loadConfig();
 
-      // First run: prompt for Plaid credentials
       if (!config) {
         const rl = createInterface({
           input: process.stdin,
@@ -77,14 +98,12 @@ program
         saveConfig(config);
       }
 
-      // Run Plaid Link flow
       const result = await runLinkFlow() as {
         accessToken: string;
         itemId: string;
         institutionName?: string;
       };
 
-      // Save encrypted access token
       config.items.push({
         access_token: await encrypt(result.accessToken),
         item_id: result.itemId,
@@ -93,9 +112,8 @@ program
       });
       saveConfig(config);
 
-      // Init DB and sync initial accounts
       initDb();
-      const syncResult = await syncAll();
+      await syncAll();
 
       const accounts = getAccounts().map(toAccountResponse);
       const output = { accounts };
@@ -153,17 +171,8 @@ program
       requireConfigured();
       initDb();
 
-      // Validate date formats
-      if (opts.from && !/^\d{4}-\d{2}-\d{2}$/.test(opts.from)) {
-        throw new ConfigError(
-          `Invalid --from date "${opts.from}". Use YYYY-MM-DD format.`
-        );
-      }
-      if (opts.to && !/^\d{4}-\d{2}-\d{2}$/.test(opts.to)) {
-        throw new ConfigError(
-          `Invalid --to date "${opts.to}". Use YYYY-MM-DD format.`
-        );
-      }
+      validateDateOpt(opts.from, "--from");
+      validateDateOpt(opts.to, "--to");
 
       const transactions = getTransactions({
         from: opts.from,
@@ -182,11 +191,8 @@ program
       };
 
       if (transactions.length === 0) {
-        if (pretty) {
-          writePretty(response, "ls");
-        } else {
-          writeJson(response);
-        }
+        if (pretty) writePretty(response, "ls");
+        else writeJson(response);
         exitNoResults();
       }
 
@@ -218,11 +224,8 @@ program
       };
 
       if (accounts.length === 0) {
-        if (pretty) {
-          writePretty(response, "accounts");
-        } else {
-          writeJson(response);
-        }
+        if (pretty) writePretty(response, "accounts");
+        else writeJson(response);
         exitNoResults();
       }
 
@@ -237,11 +240,445 @@ program
     }
   });
 
+// ── search ──
+
+program
+  .command("search <query>")
+  .description("Full-text search transactions (BM25 ranked)")
+  .option("--limit <n>", "Limit number of results", parseInt, 50)
+  .action(async (query, opts) => {
+    const pretty = program.opts().pretty;
+    try {
+      requireConfigured();
+      initDb();
+
+      const transactions = searchTransactions(query, opts.limit);
+      const response: SearchResponse = {
+        transactions: transactions.map(toTransactionResponse),
+        count: transactions.length,
+        query,
+      };
+
+      if (transactions.length === 0) {
+        if (pretty) writePretty(response, "search");
+        else writeJson(response);
+        exitNoResults();
+      }
+
+      if (pretty) {
+        writePretty(response, "search");
+      } else {
+        writeJson(response);
+      }
+      exitSuccess();
+    } catch (err) {
+      handleError(err, pretty);
+    }
+  });
+
+// ── grep ──
+
+program
+  .command("grep <pattern>")
+  .description("Regex search on merchant/transaction names")
+  .option("--from <date>", "Start date (YYYY-MM-DD)")
+  .option("--to <date>", "End date (YYYY-MM-DD)")
+  .option("--limit <n>", "Limit number of results", parseInt)
+  .action(async (pattern, opts) => {
+    const pretty = program.opts().pretty;
+    try {
+      requireConfigured();
+      initDb();
+
+      validateDateOpt(opts.from, "--from");
+      validateDateOpt(opts.to, "--to");
+
+      const transactions = grepTransactions(pattern, {
+        from: opts.from,
+        to: opts.to,
+        limit: opts.limit,
+      });
+      const response: GrepResponse = {
+        transactions: transactions.map(toTransactionResponse),
+        count: transactions.length,
+        pattern,
+      };
+
+      if (transactions.length === 0) {
+        if (pretty) writePretty(response, "grep");
+        else writeJson(response);
+        exitNoResults();
+      }
+
+      if (pretty) {
+        writePretty(response, "grep");
+      } else {
+        writeJson(response);
+      }
+      exitSuccess();
+    } catch (err) {
+      handleError(err, pretty);
+    }
+  });
+
+// ── tag ──
+
+program
+  .command("tag <pattern> <tag>")
+  .description("Add a tag rule (regex pattern → tag)")
+  .option("--priority <n>", "Rule priority (higher = checked first)", parseInt, 0)
+  .action(async (pattern, tag, opts) => {
+    const pretty = program.opts().pretty;
+    try {
+      requireConfigured();
+      initDb();
+
+      const id = addTagRule(pattern, tag, opts.priority);
+      const response = { id, pattern, tag, priority: opts.priority };
+
+      if (pretty) {
+        writePretty(response, "tag");
+      } else {
+        writeJson(response);
+      }
+      exitSuccess();
+    } catch (err) {
+      handleError(err, pretty);
+    }
+  });
+
+// ── tags ──
+
+program
+  .command("tags")
+  .description("List all tag rules")
+  .action(async () => {
+    const pretty = program.opts().pretty;
+    try {
+      requireConfigured();
+      initDb();
+
+      const rules = getTagRules();
+      const response: TagRulesResponse = {
+        rules: rules.map((r) => ({
+          id: r.id,
+          pattern: r.pattern,
+          tag: r.tag,
+          priority: r.priority,
+        })),
+        count: rules.length,
+      };
+
+      if (rules.length === 0) {
+        if (pretty) writePretty(response, "tags");
+        else writeJson(response);
+        exitNoResults();
+      }
+
+      if (pretty) {
+        writePretty(response, "tags");
+      } else {
+        writeJson(response);
+      }
+      exitSuccess();
+    } catch (err) {
+      handleError(err, pretty);
+    }
+  });
+
+// ── split ──
+
+program
+  .command("split")
+  .description("Show spending breakdown by tag/category")
+  .option("--from <date>", "Start date (YYYY-MM-DD)")
+  .option("--to <date>", "End date (YYYY-MM-DD)")
+  .action(async (opts) => {
+    const pretty = program.opts().pretty;
+    try {
+      requireConfigured();
+      initDb();
+
+      validateDateOpt(opts.from, "--from");
+      validateDateOpt(opts.to, "--to");
+
+      const categories = getSpendingByTag({ from: opts.from, to: opts.to });
+      const total = categories.reduce((s, c) => s + c.total, 0);
+      const response: SplitResponse = {
+        categories,
+        total: Math.round(total * 100) / 100,
+      };
+
+      if (categories.length === 0) {
+        if (pretty) writePretty(response, "split");
+        else writeJson(response);
+        exitNoResults();
+      }
+
+      if (pretty) {
+        writePretty(response, "split");
+      } else {
+        writeJson(response);
+      }
+      exitSuccess();
+    } catch (err) {
+      handleError(err, pretty);
+    }
+  });
+
+// ── budget ──
+
+program
+  .command("budget [tag] [limit]")
+  .description("Set or show budgets")
+  .option("--alert <threshold>", "Alert threshold (0-1)", parseFloat, 0.9)
+  .option("--month <YYYY-MM>", "Month to show status for")
+  .option("--delete", "Delete the budget for the given tag")
+  .action(async (tag, limit, opts) => {
+    const pretty = program.opts().pretty;
+    try {
+      requireConfigured();
+      initDb();
+
+      // Delete mode
+      if (opts.delete && tag) {
+        const deleted = deleteBudget(tag);
+        const response = { deleted, tag };
+        writeJson(response);
+        exitSuccess();
+      }
+
+      // Set budget
+      if (tag && limit) {
+        setBudget(tag, parseFloat(limit), opts.alert);
+        const response = { tag, monthly_limit: parseFloat(limit), alert_threshold: opts.alert };
+        if (pretty) {
+          writePretty(response, "tag");
+        } else {
+          writeJson(response);
+        }
+        exitSuccess();
+      }
+
+      // Show budgets
+      const budgets = getBudgetStatuses(opts.month);
+      const month = opts.month || `${new Date().getFullYear()}-${String(new Date().getMonth() + 1).padStart(2, "0")}`;
+      const response: BudgetsResponse = { budgets, month };
+
+      if (budgets.length === 0) {
+        if (pretty) writePretty(response, "budgets");
+        else writeJson(response);
+        exitNoResults();
+      }
+
+      if (pretty) {
+        writePretty(response, "budgets");
+      } else {
+        writeJson(response);
+      }
+      exitSuccess();
+    } catch (err) {
+      handleError(err, pretty);
+    }
+  });
+
+// ── burn ──
+
+program
+  .command("burn")
+  .description("Show monthly spending burn rate")
+  .option("--months <n>", "Number of months", parseInt, 6)
+  .action(async (opts) => {
+    const pretty = program.opts().pretty;
+    try {
+      requireConfigured();
+      initDb();
+
+      const burn = getBurnReport(opts.months);
+      const response: BurnResponse = { burn };
+
+      if (burn.months.length === 0) {
+        if (pretty) writePretty(response, "burn");
+        else writeJson(response);
+        exitNoResults();
+      }
+
+      if (pretty) {
+        writePretty(response, "burn");
+      } else {
+        writeJson(response);
+      }
+      exitSuccess();
+    } catch (err) {
+      handleError(err, pretty);
+    }
+  });
+
+// ── net ──
+
+program
+  .command("net")
+  .description("Show income vs expenses by month")
+  .option("--months <n>", "Number of months", parseInt, 6)
+  .action(async (opts) => {
+    const pretty = program.opts().pretty;
+    try {
+      requireConfigured();
+      initDb();
+
+      const net = getNetReport(opts.months);
+      const response: NetResponse = { net };
+
+      if (net.months.length === 0) {
+        if (pretty) writePretty(response, "net");
+        else writeJson(response);
+        exitNoResults();
+      }
+
+      if (pretty) {
+        writePretty(response, "net");
+      } else {
+        writeJson(response);
+      }
+      exitSuccess();
+    } catch (err) {
+      handleError(err, pretty);
+    }
+  });
+
+// ── snapshot ──
+
+program
+  .command("snapshot")
+  .description("Comprehensive financial summary")
+  .action(async () => {
+    const pretty = program.opts().pretty;
+    try {
+      requireConfigured();
+      initDb();
+
+      const response = getSnapshot();
+
+      if (pretty) {
+        writePretty(response, "snapshot");
+      } else {
+        writeJson(response);
+      }
+      exitSuccess();
+    } catch (err) {
+      handleError(err, pretty);
+    }
+  });
+
+// ── export ──
+
+program
+  .command("export")
+  .description("Export transactions to CSV or JSON")
+  .option("--format <type>", "Output format: csv or json", "csv")
+  .option("--from <date>", "Start date (YYYY-MM-DD)")
+  .option("--to <date>", "End date (YYYY-MM-DD)")
+  .option("--tag <category>", "Filter by tag/category")
+  .action(async (opts) => {
+    const pretty = program.opts().pretty;
+    try {
+      requireConfigured();
+      initDb();
+
+      validateDateOpt(opts.from, "--from");
+      validateDateOpt(opts.to, "--to");
+
+      const transactions = getTransactions({
+        from: opts.from,
+        to: opts.to,
+        tag: opts.tag,
+      }).map(toTransactionResponse);
+
+      if (transactions.length === 0) {
+        writeJson({ transactions: [], count: 0 });
+        exitNoResults();
+      }
+
+      if (opts.format === "json") {
+        process.stdout.write(exportJson(transactions));
+      } else {
+        process.stdout.write(exportCsv(transactions));
+      }
+      exitSuccess();
+    } catch (err) {
+      handleError(err, pretty);
+    }
+  });
+
+// ── unlink ──
+
+program
+  .command("unlink <identifier>")
+  .description("Remove a linked account and its data")
+  .action(async (identifier) => {
+    const pretty = program.opts().pretty;
+    try {
+      requireConfigured();
+      initDb();
+
+      // Find the account
+      const account = getAccountByIdOrMask(identifier);
+      if (!account) {
+        throw new ConfigError(`Account not found: "${identifier}"`);
+      }
+
+      const itemId = account.item_id;
+
+      // Cascading removal: transactions first (FK constraint), then accounts
+      const allAccounts = getAccounts().filter((a) => a.item_id === itemId);
+      const accountIds = allAccounts.map((a) => a.account_id);
+      const txnCount = removeTransactionsByAccount(accountIds);
+      removeAccountsByItem(itemId);
+      removeSyncState(itemId);
+      removeItem(itemId);
+
+      const response = {
+        removed: {
+          item_id: itemId,
+          accounts: accountIds.length,
+          transactions: txnCount,
+        },
+      };
+
+      writeJson(response);
+      exitSuccess();
+    } catch (err) {
+      handleError(err, pretty);
+    }
+  });
+
+// ── mcp ──
+
+program
+  .command("mcp")
+  .description("Start MCP server for AI agent integration")
+  .action(async () => {
+    try {
+      const { startMcpServer } = await import("./mcp.js");
+      await startMcpServer();
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      writeError({ error: { code: "MCP_ERROR", message: msg } });
+      exitError();
+    }
+  });
+
 // ── Helpers ──
 
 function requireConfigured(): void {
   if (!isConfigured()) {
     throw new ConfigError("Not configured. Run `cashflow link` first.");
+  }
+}
+
+function validateDateOpt(value: string | undefined, flag: string): void {
+  if (value && !/^\d{4}-\d{2}-\d{2}$/.test(value)) {
+    throw new ConfigError(`Invalid ${flag} date "${value}". Use YYYY-MM-DD format.`);
   }
 }
 
@@ -276,10 +713,11 @@ function toTransactionResponse(t: {
   date: string;
   name: string;
   merchant_name: string | null;
-  pending: number;
+  pending: number | boolean;
   category: string | null;
   subcategory: string | null;
   payment_channel: string | null;
+  tag?: string | null;
 }): TransactionResponse {
   return {
     transaction_id: t.transaction_id,
@@ -288,10 +726,11 @@ function toTransactionResponse(t: {
     date: t.date,
     name: t.name,
     merchant_name: t.merchant_name,
-    pending: t.pending === 1,
+    pending: typeof t.pending === "boolean" ? t.pending : t.pending === 1,
     category: t.category,
     subcategory: t.subcategory,
     payment_channel: t.payment_channel,
+    tag: t.tag ?? null,
   };
 }
 

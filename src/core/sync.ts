@@ -9,6 +9,7 @@ import {
   setSyncState,
 } from "./db.js";
 import { getDecryptedAccessTokens } from "./config.js";
+import { applyTagRules } from "./tags.js";
 import type { SyncResponse } from "../types/index.js";
 import { SyncError } from "../types/index.js";
 
@@ -106,6 +107,9 @@ export async function syncItem(
     }
     setSyncState(itemId, cursor);
   })();
+
+  // Auto-tag new transactions
+  applyTagRules();
 
   return {
     added: allAdded.length,
